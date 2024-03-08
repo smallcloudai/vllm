@@ -23,6 +23,7 @@ from typing import List, Optional, Tuple
 import torch
 from torch import nn
 
+from vllm.config import LoRAConfig
 from vllm.model_executor.input_metadata import InputMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.layers.attention import PagedAttention
@@ -233,10 +234,34 @@ class Starcoder2Model(nn.Module):
 
 
 class Starcoder2ForCausalLM(nn.Module):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ]
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+        "embed_tokens",
+        "lm_head",
+    ]
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+        "lm_head": "output_embeddings",
+    }
+    embedding_padding_modules = ["lm_head"]
+
 
     def __init__(self,
                  config: Starcoder2Config,
-                 linear_method: Optional[LinearMethodBase] = None):
+                 linear_method: Optional[LinearMethodBase] = None,
+                 lora_config: Optional[LoRAConfig] = None,):
         super().__init__()
         self.config = config
         self.model = Starcoder2Model(config, linear_method=linear_method)
@@ -244,13 +269,18 @@ class Starcoder2ForCausalLM(nn.Module):
         self.unpadded_vocab_size = config.vocab_size
         if config.tie_word_embeddings:
             self.lm_head_weight = self.model.embed_tokens.weight
+        if lora_config:
+            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         else:
             self.unpadded_vocab_size = config.vocab_size
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
                 config.hidden_size,
                 org_num_embeddings=config.vocab_size,
-                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE
+                # We need bigger padding if using lora for kernel
+                # compatibility
+                if not lora_config else lora_config.lora_vocab_padding_size,
             )
             self.lm_head_weight = self.lm_head.weight
         self.sampler = Sampler(self.unpadded_vocab_size, config.vocab_size)
