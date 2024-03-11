@@ -259,8 +259,8 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
     supported_lora_modules = [
         "qkv_proj",
         "o_proj",
-        "gate_up_proj",
-        "down_proj",
+        "c_proj",
+        "c_fc",
         "embed_tokens",
         "lm_head",
     ]
@@ -279,12 +279,13 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
                                      prefix=maybe_prefix(prefix, "model"))
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
+        if lora_config:
+            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         else:
-            self.unpadded_vocab_size = config.vocab_size
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
                 config.hidden_size,
