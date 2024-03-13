@@ -291,19 +291,22 @@ class GPTRefactForCausalLM(nn.Module):
         super().__init__()
         self.config = config
         self.transformer = RefactModel(config, linear_method)
-        vocab_size = ((config.vocab_size + 63) // 64) * 64
+        self.vocab_size = ((config.vocab_size + 63) // 64) * 64
+        self.unpadded_vocab_size = config.vocab_size
+        if lora_config:
+            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         self.ln_f = LayerNormWithoutBias(config.hidden_size, eps=config.layer_norm_epsilon)
         self.lm_head = ParallelLMHead(
-            vocab_size,
+            self.unpadded_vocab_size,
             config.hidden_size,
             bias=False,
-            org_num_embeddings=vocab_size,
+            org_num_embeddings=self.vocab_size,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
         )
-        self.sampler = Sampler(config.vocab_size)
+        self.sampler = Sampler(self.unpadded_vocab_size, config.vocab_size)
 
     def forward(
             self,
