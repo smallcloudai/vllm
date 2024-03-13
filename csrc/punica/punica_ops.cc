@@ -57,12 +57,20 @@ inline bool launch_bgmv_kernel(out_T *Y, const in_T *X, const W_T *W,
                                    full_y_size, batch_size, num_layers,        \
                                    layer_idx, scale);                          \
     break;
+
 #define CASE(_in_T, _out_T, _W_T, narrow, wide)                                \
   CASE_ONESIDE(in_T, out_T, W_T, narrow, wide)                                 \
   CASE_ONESIDE(in_T, out_T, W_T, wide, narrow)
 
     FOR_BGMV_WIDE_NARROW(CASE, _, _, _)
 #undef CASE
+
+#define CASE(narrow, wide, _in_T, _out_T, _W_T)                                \
+  CASE_ONESIDE(in_T, out_T, W_T, narrow, wide)
+
+    FOR_BGMV_ONESIDE(CASE, _, _, _)
+#undef CASE
+
 #undef CASE_ONESIDE
   default:
     return false;

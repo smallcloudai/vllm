@@ -9,6 +9,8 @@ TEMPLATE = """
 #include "bgmv_config.h"
 #include "bgmv_impl.cuh"
 
+FOR_BGMV_ONESIDE(INST_BGMV, {input_dtype}, {output_dtype}, {weight_dtype})
+
 FOR_BGMV_WIDE_NARROW(INST_BGMV_TWOSIDE, {input_dtype}, {output_dtype}, {weight_dtype})
 """.lstrip()
 
