@@ -4,3 +4,4 @@
 FOR_BGMV_ONESIDE(INST_BGMV, nv_half, float, nv_half)
 
 FOR_BGMV_WIDE_NARROW(INST_BGMV_TWOSIDE, nv_half, float, nv_half)
+FOR_INST_BGMV_WIDE_NARROW(INST_BGMV_ONESIDE, nv_half, float, nv_half)
