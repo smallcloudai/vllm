@@ -163,7 +163,4 @@ void bgmv_kernel(out_T *__restrict__ Y, const in_T *__restrict__ X,
     f(in_T, out_T, W_T, 32, 64) \
     f(in_T, out_T, W_T, 64, 64)
 
-#define FOR_BGMV_ONESIDE(f, in_T, out_T, W_T) \
-    f(64, 64, in_T, out_T, W_T)
-
 // clang-format on
