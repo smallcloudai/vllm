@@ -10,7 +10,8 @@ tokenizers >= 0.19.1  # Required for Llama 3.
 fastapi
 openai
 uvicorn[standard]
-pydantic >= 2.0  # Required for OpenAI server.
+# pydantic >= 2.0  # Required for OpenAI server.
+pydantic
 prometheus_client >= 0.18.0
 prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken == 0.6.0  # Required for DBRX tokenizer
