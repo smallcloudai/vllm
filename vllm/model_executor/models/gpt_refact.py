@@ -258,16 +258,15 @@ class GPTRefactForCausalLM(nn.Module):
     packed_modules_mapping = {
         "qkv_proj": [
             "q",
-            "k",
-            "v",
+            "kv",
         ]
     }
 
     supported_lora_modules = [
-        "attn.qkv_proj",
-        "attn.c_proj",
-        "mlp.gate_up_proj",
-        "mlp.c_proj",
+        "q",
+        "kv",
+        "c_proj",
+        "gate_up_proj",
         "wte",
         "lm_head",
     ]
@@ -275,7 +274,9 @@ class GPTRefactForCausalLM(nn.Module):
         "wte": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
+    embedding_padding_modules = [
+        "lm_head"
+    ]
 
     def __init__(
             self,
