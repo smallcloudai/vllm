@@ -5,28 +5,26 @@ The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
 import math
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Iterable
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import LlamaConfig
 
+from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import LoRAConfig
-from vllm.model_executor.input_metadata import InputMetadata
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.attention import PagedAttention
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearMethodBase,
-                                               RowParallelLinear, QKVParallelLinear)
+                                               QuantizationConfig,
+                                               RowParallelLinear,
+                                               QKVParallelLinear)
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
-from vllm.model_executor.parallel_utils.parallel_state import (
-    get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator, convert_pyslice_to_tensor)
 from vllm.sequence import SamplerOutput
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
@@ -80,7 +78,7 @@ class RefactMLP(nn.Module):
             self,
             hidden_size: int,
             mult: float,
-            linear_method: Optional[LinearMethodBase] = None,
+            quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         multiple_of = 256
@@ -90,13 +88,13 @@ class RefactMLP(nn.Module):
             hidden_size,
             2 * self.intermediate_size,
             bias=False,
-            linear_method=linear_method
+            quant_config=quant_config
         )
         self.c_proj = RowParallelLinear(
             self.intermediate_size,
             hidden_size,
             bias=False,
-            linear_method=linear_method
+            quant_config=quant_config
         )
         self.act_fn = SiluAndMul()
 
@@ -113,7 +111,7 @@ class RefactAttention(nn.Module):
             self,
             hidden_size: int,
             num_heads: int,
-            linear_method: Optional[LinearMethodBase] = None,
+            quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -136,37 +134,33 @@ class RefactAttention(nn.Module):
             self.total_num_heads,
             self.num_kv_heads,
             bias=False,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.c_proj = RowParallelLinear(
             self.hidden_size,
             self.hidden_size,
             bias=False,
             input_is_parallel=True,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         head_start = tp_rank * self.num_heads
         head_end = (tp_rank + 1) * self.num_heads
         alibi_slopes = _get_alibi_slopes(self.num_heads)
         alibi_slopes = alibi_slopes[head_start:head_end].tolist()
-        self.sa = PagedAttention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            alibi_slopes=alibi_slopes,
-            num_kv_heads=self.num_kv_heads
-        )
+        self.backend = get_attn_backend(torch.get_default_dtype())
+        impl_cls = self.backend.get_impl_cls()
+        self.sa = impl_cls(num_heads, self.head_dim, self.scaling, self.num_kv_heads,
+                           alibi_slopes=alibi_slopes, sliding_window=None)
 
     def forward(
             self,
             hidden_states: torch.Tensor,
-            kv_cache: KVCache,
-            input_metadata: InputMetadata,
+            kv_cache: torch.Tensor,
+            attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        k_cache, v_cache = kv_cache
-        attn_output = self.sa(q, k, v, k_cache, v_cache, input_metadata)
+        attn_output = self.sa.forward(q, k, v, kv_cache, attn_metadata, 1.0)
         output, _ = self.c_proj(attn_output)
         return output
 
@@ -176,19 +170,19 @@ class RefactDecoderLayer(nn.Module):
     def __init__(
             self,
             config: LlamaConfig,
-            linear_method: Optional[LinearMethodBase] = None,
+            quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.attn = RefactAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.mlp = RefactMLP(
             hidden_size=self.hidden_size,
             mult=4.0,
-            linear_method=linear_method,
+            quant_config=quant_config,
         )
         self.ln_1 = LayerNormWithoutBias(
             self.hidden_size,
@@ -203,14 +197,14 @@ class RefactDecoderLayer(nn.Module):
             self,
             hidden_states: torch.Tensor,
             kv_cache: KVCache,
-            input_metadata: InputMetadata,
+            attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.ln_1(hidden_states)
         hidden_states = self.attn(
             hidden_states=hidden_states,
             kv_cache=kv_cache,
-            input_metadata=input_metadata,
+            attn_metadata=attn_metadata,
         )
         hidden_states = residual + hidden_states
 
@@ -227,7 +221,7 @@ class RefactModel(nn.Module):
     def __init__(
             self,
             config: LlamaConfig,
-            linear_method: Optional[LinearMethodBase] = None,
+            quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.config = config
@@ -237,7 +231,7 @@ class RefactModel(nn.Module):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.wte = VocabParallelEmbedding(vocab_size, config.hidden_size)
         self.h = nn.ModuleList([
-            RefactDecoderLayer(config, linear_method)
+            RefactDecoderLayer(config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
 
@@ -246,7 +240,7 @@ class RefactModel(nn.Module):
             input_ids: torch.Tensor,
             position_ids: torch.Tensor,
             kv_caches: List[KVCache],
-            input_metadata: InputMetadata,
+            attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         hidden_states = self.wte(input_ids)
         for i in range(len(self.h)):
@@ -254,7 +248,7 @@ class RefactModel(nn.Module):
             hidden_states = layer(
                 hidden_states,
                 kv_caches[i],
-                input_metadata,
+                attn_metadata,
             )
         return hidden_states
 
@@ -285,12 +279,12 @@ class GPTRefactForCausalLM(nn.Module):
     def __init__(
             self,
             config: LlamaConfig,
-            linear_method: Optional[LinearMethodBase] = None,
+            quant_config: Optional[QuantizationConfig] = None,
             lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config = config
-        self.transformer = RefactModel(config, linear_method)
+        self.transformer = RefactModel(config, quant_config)
         self.vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
@@ -313,10 +307,10 @@ class GPTRefactForCausalLM(nn.Module):
             input_ids: torch.Tensor,
             positions: torch.Tensor,
             kv_caches: List[KVCache],
-            input_metadata: InputMetadata,
+            attn_metadata: AttentionMetadata,
     ) -> SamplerOutput:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         input_metadata)
+                                         attn_metadata)
         return self.ln_f(hidden_states)
 
     def sample(
@@ -328,11 +322,7 @@ class GPTRefactForCausalLM(nn.Module):
                                    sampling_metadata)
         return next_tokens
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q", "q"),
@@ -341,8 +331,7 @@ class GPTRefactForCausalLM(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
