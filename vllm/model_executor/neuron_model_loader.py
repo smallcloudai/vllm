@@ -34,7 +34,7 @@ def _get_model_architecture(config: PretrainedConfig) -> Type[nn.Module]:
 
 def get_model(model_config: ModelConfig, device_config: DeviceConfig,
               **kwargs) -> nn.Module:
-    from transformers_neuronx.config import NeuronConfig, ContinuousBatchingConfig
+    from transformers_neuronx.config import NeuronConfig, ContinuousBatchingConfig, GQA, QuantizationConfig, GenerationConfig
 
     parallel_config = kwargs.get("parallel_config")
     scheduler_config = kwargs.get("scheduler_config")
@@ -47,8 +47,23 @@ def get_model(model_config: ModelConfig, device_config: DeviceConfig,
 
     continuous_batching_config = ContinuousBatchingConfig(
         batch_size_for_shared_caches=scheduler_config.max_num_seqs)
-    neuron_config = NeuronConfig(
-        continuous_batching=continuous_batching_config)
+    if "starcoder2" in model_config.model:
+        neuron_config = NeuronConfig(
+            on_device_embedding=True,
+            attention_layout='BSH',
+            fuse_qkv=True,
+            group_query_attention=GQA.REPLICATED_HEADS,
+            quant=QuantizationConfig(),
+            weight_tiling=True,
+            qkv_tiling=True,
+            # on_device_generation=GenerationConfig(
+            #     max_length=50,
+            #     do_sample=True,
+            #     top_k=7,
+            #     temperature=0.8),
+            continuous_batching=continuous_batching_config)
+    else:
+        neuron_config = NeuronConfig(continuous_batching=continuous_batching_config)
 
     # Load the weights from the cached or downloaded files.
     model.load_weights(

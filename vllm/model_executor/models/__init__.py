@@ -63,7 +63,10 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS = {
 }
 
 # Models not supported by Neuron.
-_NEURON_SUPPORTED_MODELS = {"LlamaForCausalLM": "neuron.llama"}
+_NEURON_SUPPORTED_MODELS = {
+    "LlamaForCausalLM": "neuron.llama",
+    "Starcoder2ForCausalLM": "neuron.starcoder2"
+}
 
 
 class ModelRegistry:
