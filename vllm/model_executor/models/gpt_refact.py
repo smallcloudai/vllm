@@ -21,12 +21,12 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear,
                                                QKVParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import Sampler
+from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput, IntermediateTensors
+from vllm.sequence import IntermediateTensors
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -150,12 +150,12 @@ class RefactAttention(nn.Module):
         alibi_slopes = _get_alibi_slopes(self.num_heads)
         alibi_slopes = alibi_slopes[head_start:head_end].tolist()
         self.sa = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              alibi_slopes=alibi_slopes,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config)
+                            self.head_dim,
+                            self.scaling,
+                            alibi_slopes=alibi_slopes,
+                            num_kv_heads=self.num_kv_heads,
+                            cache_config=cache_config,
+                            quant_config=quant_config)
 
     def forward(
             self,
@@ -322,16 +322,20 @@ class GPTRefactForCausalLM(nn.Module):
             self,
             input_ids: torch.Tensor,
             positions: torch.Tensor,
-            kv_caches: List[KVCache],
+            kv_caches: List[torch.Tensor],
             attn_metadata: AttentionMetadata,
-    ) -> SamplerOutput:
+            intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata)
+                                         attn_metadata, intermediate_tensors)
         return self.ln_f(hidden_states)
 
-    def compute_logits(self, hidden_states: torch.Tensor,
-                       sampling_metadata: SamplingMetadata) -> torch.Tensor:
-        logits = self.logits_processor(self.lm_head.weight, hidden_states,
+    def compute_logits(
+            self,
+            hidden_states: torch.Tensor,
+            sampling_metadata: SamplingMetadata
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
 
