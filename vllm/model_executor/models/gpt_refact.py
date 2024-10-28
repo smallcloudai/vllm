@@ -5,16 +5,16 @@ The input of the model is flattened to a 1D tensor of tokens. The model uses
 InputMetadata to extract the original 2D shape of the input.
 """
 import math
-from typing import List, Optional, Tuple, Iterable
+from typing import List, Optional, Tuple, Iterable, Union
 
 import torch
 import torch.nn.functional as F
 from torch import nn
 from transformers import LlamaConfig
 
-from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import LoRAConfig
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+from vllm.attention import Attention, AttentionMetadata
+from vllm.config import LoRAConfig, CacheConfig
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank, get_pp_group
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QuantizationConfig,
@@ -26,7 +26,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import SamplerOutput
+from vllm.sequence import SamplerOutput, IntermediateTensors
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -112,6 +112,7 @@ class RefactAttention(nn.Module):
             self,
             hidden_size: int,
             num_heads: int,
+            cache_config: Optional[CacheConfig] = None,
             quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -148,10 +149,13 @@ class RefactAttention(nn.Module):
         head_end = (tp_rank + 1) * self.num_heads
         alibi_slopes = _get_alibi_slopes(self.num_heads)
         alibi_slopes = alibi_slopes[head_start:head_end].tolist()
-        self.backend = get_attn_backend(torch.get_default_dtype())
-        impl_cls = self.backend.get_impl_cls()
-        self.sa = impl_cls(num_heads, self.head_dim, self.scaling, self.num_kv_heads,
-                           alibi_slopes=alibi_slopes, sliding_window=None)
+        self.sa = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              alibi_slopes=alibi_slopes,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config)
 
     def forward(
             self,
@@ -161,7 +165,7 @@ class RefactAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        attn_output = self.sa.forward(q, k, v, kv_cache, attn_metadata, 1.0)
+        attn_output = self.sa.forward(q, k, v, kv_cache, attn_metadata)
         output, _ = self.c_proj(attn_output)
         return output
 
@@ -171,6 +175,7 @@ class RefactDecoderLayer(nn.Module):
     def __init__(
             self,
             config: LlamaConfig,
+            cache_config: Optional[CacheConfig] = None,
             quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -178,6 +183,7 @@ class RefactDecoderLayer(nn.Module):
         self.attn = RefactAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
+            cache_config=cache_config,
             quant_config=quant_config,
         )
         self.mlp = RefactMLP(
@@ -222,6 +228,7 @@ class RefactModel(nn.Module):
     def __init__(
             self,
             config: LlamaConfig,
+            cache_config: Optional[CacheConfig] = None,
             quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
@@ -232,18 +239,23 @@ class RefactModel(nn.Module):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.wte = VocabParallelEmbedding(vocab_size, config.hidden_size)
         self.h = nn.ModuleList([
-            RefactDecoderLayer(config, quant_config)
+            RefactDecoderLayer(config, cache_config, quant_config)
             for _ in range(config.num_hidden_layers)
         ])
 
     def forward(
             self,
             input_ids: torch.Tensor,
-            position_ids: torch.Tensor,
+            positions: torch.Tensor,
             kv_caches: List[KVCache],
             attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
-        hidden_states = self.wte(input_ids)
+            intermediate_tensors: Optional[IntermediateTensors],
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            hidden_states = self.wte(input_ids)
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
         for i in range(len(self.h)):
             layer = self.h[i]
             hidden_states = layer(
@@ -281,12 +293,13 @@ class GPTRefactForCausalLM(nn.Module):
     def __init__(
             self,
             config: LlamaConfig,
+            cache_config: Optional[CacheConfig] = None,
             quant_config: Optional[QuantizationConfig] = None,
             lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config = config
-        self.transformer = RefactModel(config, quant_config)
+        self.transformer = RefactModel(config, cache_config, quant_config)
         self.vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
