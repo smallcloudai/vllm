@@ -25,6 +25,7 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models import SupportsLoRA
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
@@ -230,11 +231,14 @@ class RefactModel(nn.Module):
             config: LlamaConfig,
             cache_config: Optional[CacheConfig] = None,
             quant_config: Optional[QuantizationConfig] = None,
+            lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
         self.config = config
         self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
+        self.vocab_size = config.vocab_size + lora_vocab
 
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.wte = VocabParallelEmbedding(vocab_size, config.hidden_size)
@@ -266,7 +270,7 @@ class RefactModel(nn.Module):
         return hidden_states
 
 
-class GPTRefactForCausalLM(nn.Module):
+class GPTRefactForCausalLM(nn.Module, SupportsLoRA):
     packed_modules_mapping = {
         "qkv_proj": [
             "q",
@@ -299,7 +303,7 @@ class GPTRefactForCausalLM(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.transformer = RefactModel(config, cache_config, quant_config)
+        self.transformer = RefactModel(config, cache_config, quant_config, lora_config=lora_config)
         self.vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
@@ -314,6 +318,7 @@ class GPTRefactForCausalLM(nn.Module):
             # We need bigger padding if using lora for kernel
             # compatibility
             if not lora_config else lora_config.lora_vocab_padding_size,
+            quant_config=quant_config,
         )
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size, config.vocab_size)
         self.sampler = Sampler()
