@@ -42,7 +42,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import SupportsPP
+from .interfaces import SupportsPP, SupportsLoRA
 from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
@@ -206,7 +206,9 @@ class Starcoder2Model(nn.Module):
 
         self.config = config
         self.padding_idx = config.pad_token_id
-        self.vocab_size = config.vocab_size
+        lora_vocab = (lora_config.lora_extra_vocab_size *
+                      (lora_config.max_loras or 1)) if lora_config else 0
+        self.vocab_size = config.vocab_size + lora_vocab
 
         # TODO: consider padding_idx (currently removed)
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
@@ -246,7 +248,7 @@ class Starcoder2Model(nn.Module):
         return hidden_states
 
 
-class Starcoder2ForCausalLM(nn.Module, SupportsPP):
+class Starcoder2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -275,16 +277,16 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self.model = Starcoder2Model(vllm_config=vllm_config,
-                                     prefix=maybe_prefix(prefix, "model"))
+        self.model = Starcoder2Model(config,
+                                     cache_config,
+                                     quant_config=quant_config)
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
+        self.lora_config = lora_config
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
         else:
             self.lm_head = ParallelLMHead(
                 self.unpadded_vocab_size,
