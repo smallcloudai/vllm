@@ -303,6 +303,7 @@ class GPTRefactForCausalLM(nn.Module, SupportsLoRA):
     ):
         super().__init__()
         self.config = config
+        self.lora_config = lora_config
         self.transformer = RefactModel(config, cache_config, quant_config, lora_config=lora_config)
         self.vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.unpadded_vocab_size = config.vocab_size
