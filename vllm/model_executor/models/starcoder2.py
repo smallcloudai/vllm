@@ -23,7 +23,6 @@ import torch
 from torch import nn
 from transformers import Starcoder2Config
 
-from vllm.config import LoRAConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -206,8 +205,8 @@ class Starcoder2Model(nn.Module):
 
         self.config = config
         self.padding_idx = config.pad_token_id
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
+        lora_vocab = (vllm_config.lora_config.lora_extra_vocab_size *
+                      (vllm_config.lora_config.max_loras or 1)) if vllm_config.lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
 
         # TODO: consider padding_idx (currently removed)
@@ -263,8 +262,8 @@ class Starcoder2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "o_proj",
         "c_proj",
         "c_fc",
-        "embed_tokens",
-        "lm_head",
+        # "embed_tokens",
+        # "lm_head",
     ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
@@ -277,14 +276,13 @@ class Starcoder2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self.model = Starcoder2Model(config,
-                                     cache_config,
-                                     quant_config=quant_config)
+        self.model = Starcoder2Model(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(prefix, "model"))
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
-        self.lora_config = lora_config
-        if lora_config:
-            self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
+        self.lora_config = vllm_config.lora_config
+        if vllm_config.lora_config:
+            self.unpadded_vocab_size += vllm_config.lora_config.lora_extra_vocab_size
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         else:
@@ -295,7 +293,7 @@ class Starcoder2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE
                 # We need bigger padding if using lora for kernel
                 # compatibility
-                if not lora_config else lora_config.lora_vocab_padding_size,
+                if not vllm_config.lora_config else vllm_config.lora_config.lora_vocab_padding_size,
                 quant_config=quant_config,
             )
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,

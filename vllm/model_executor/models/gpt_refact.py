@@ -13,7 +13,7 @@ from torch import nn
 from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import LoRAConfig, CacheConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank, get_pp_group
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -26,6 +26,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding, ParallelLMHead, DEFAULT_VOCAB_PADDING_SIZE)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import SupportsLoRA
+from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
@@ -226,18 +227,17 @@ class RefactDecoderLayer(nn.Module):
 
 class RefactModel(nn.Module):
 
-    def __init__(
-            self,
-            config: LlamaConfig,
-            cache_config: Optional[CacheConfig] = None,
-            quant_config: Optional[QuantizationConfig] = None,
-            lora_config: Optional[LoRAConfig] = None,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
         self.padding_idx = config.pad_token_id
-        lora_vocab = (lora_config.lora_extra_vocab_size *
-                      (lora_config.max_loras or 1)) if lora_config else 0
+        lora_vocab = (vllm_config.lora_config.lora_extra_vocab_size *
+                      (vllm_config.lora_config.max_loras or 1)) if vllm_config.lora_config else 0
         self.vocab_size = config.vocab_size + lora_vocab
 
         vocab_size = ((config.vocab_size + 63) // 64) * 64
@@ -283,8 +283,6 @@ class GPTRefactForCausalLM(nn.Module, SupportsLoRA):
         "kv",
         "c_proj",
         "gate_up_proj",
-        "wte",
-        "lm_head",
     ]
     embedding_modules = {
         "wte": "input_embeddings",
@@ -294,17 +292,14 @@ class GPTRefactForCausalLM(nn.Module, SupportsLoRA):
         "lm_head"
     ]
 
-    def __init__(
-            self,
-            config: LlamaConfig,
-            cache_config: Optional[CacheConfig] = None,
-            quant_config: Optional[QuantizationConfig] = None,
-            lora_config: Optional[LoRAConfig] = None,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
         self.config = config
-        self.lora_config = lora_config
-        self.transformer = RefactModel(config, cache_config, quant_config, lora_config=lora_config)
+        self.transformer = RefactModel(vllm_config=vllm_config,
+                                       prefix=maybe_prefix(prefix, "model"))
         self.vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:

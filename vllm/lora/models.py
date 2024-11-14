@@ -16,6 +16,7 @@ from vllm.adapter_commons.utils import (add_adapter, deactivate_adapter,
                                         get_adapter, list_adapters,
                                         remove_adapter, set_adapter_mapping)
 from vllm.config import LoRAConfig
+from vllm.entrypoints.openai.api_server import embedding
 from vllm.logger import init_logger
 from vllm.lora.layers import (BaseLayerWithLoRA,
                               LinearScalingRotaryEmbeddingWithLora,
@@ -273,6 +274,9 @@ class LoRAModel(AdapterModel):
         elif os.path.isfile(new_embeddings_bin_file_path):
             embeddings = torch.load(new_embeddings_bin_file_path,
                                     map_location=device)
+        # Loading embeddings is completely broken for loras
+        # if embeddings is not None:
+        #     tensors.update(embeddings)
 
         rank = config["r"]
         lora_alpha = config["lora_alpha"]
@@ -539,13 +543,22 @@ class LoRAModelManager(AdapterModelManager):
             if module_name not in self.packed_modules:
                 assert embedding_modules is not None
                 if parts[-1] in embedding_modules:
-                    input_dim = (module.base_layer.org_vocab_size +
-                                 self.lora_config.lora_extra_vocab_size if
-                                 hasattr(module.base_layer, "org_vocab_size")
-                                 else module.base_layer.weight.shape[1])
-                    output_dim = module.base_layer.embedding_dim if hasattr(
-                        module.base_layer,
-                        "embedding_dim") else module.base_layer.weight.shape[0]
+                    if embedding_modules[parts[-1]] == "input_embeddings":
+                        input_dim = (module.base_layer.org_vocab_size +
+                                     self.lora_config.lora_extra_vocab_size if
+                                     hasattr(module.base_layer, "org_vocab_size")
+                                     else module.base_layer.weight.shape[1])
+                        output_dim = module.base_layer.embedding_dim if hasattr(
+                            module.base_layer,
+                            "embedding_dim") else module.base_layer.weight.shape[0]
+                    else:
+                        output_dim = (module.base_layer.org_vocab_size +
+                                      self.lora_config.lora_extra_vocab_size if
+                                      hasattr(module.base_layer, "org_vocab_size")
+                                      else module.base_layer.weight.shape[0])
+                        input_dim = module.base_layer.embedding_dim if hasattr(
+                            module.base_layer,
+                            "embedding_dim") else module.base_layer.weight.shape[1]
                     embeddings_tensor_dim = (module.base_layer.embedding_dim if
                                              hasattr(module.base_layer,
                                                      "embedding_dim") else
