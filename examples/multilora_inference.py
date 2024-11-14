@@ -85,7 +85,7 @@ def initialize_engine() -> LLMEngine:
     #   numbers will cause higher memory usage. If you know that all LoRAs will
     #   use the same rank, it is recommended to set this as low as possible.
     # max_cpu_loras: controls the size of the CPU LoRA cache.
-    engine_args = EngineArgs(model="deepseek-ai/deepseek-coder-1.3b-base",
+    engine_args = EngineArgs(model="bigcode/starcoder2-3b",
                              enable_lora=True,
                              trust_remote_code=True,
                              max_loras=1,
@@ -98,7 +98,7 @@ def initialize_engine() -> LLMEngine:
 def main():
     """Main function that sets up and runs the prompt processing."""
     engine = initialize_engine()
-    lora_path = "/home/svakhreev/.refact/perm-storage/loras/lora-20240308-173118/checkpoints/test"
+    lora_path = "/home/svakhreev/lora-20241110-175633/checkpoints/iter0015-testloss0.949"
     test_prompts = create_test_prompts(lora_path)
     process_requests(engine, test_prompts)
 
