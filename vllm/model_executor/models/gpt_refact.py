@@ -114,6 +114,7 @@ class RefactAttention(nn.Module):
             self,
             hidden_size: int,
             num_heads: int,
+            prefix: str,
             cache_config: Optional[CacheConfig] = None,
             quant_config: Optional[QuantizationConfig] = None,
     ):
@@ -157,7 +158,8 @@ class RefactAttention(nn.Module):
                             alibi_slopes=alibi_slopes,
                             num_kv_heads=self.num_kv_heads,
                             cache_config=cache_config,
-                            quant_config=quant_config)
+                            quant_config=quant_config,
+                            prefix=f"{prefix}.sa")
 
     def forward(
             self,
@@ -177,6 +179,7 @@ class RefactDecoderLayer(nn.Module):
     def __init__(
             self,
             config: LlamaConfig,
+            prefix: str,
             cache_config: Optional[CacheConfig] = None,
             quant_config: Optional[QuantizationConfig] = None,
     ):
@@ -187,6 +190,7 @@ class RefactDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            prefix=f"{prefix}.attn"
         )
         self.mlp = RefactMLP(
             hidden_size=self.hidden_size,
@@ -243,8 +247,12 @@ class RefactModel(nn.Module):
         vocab_size = ((config.vocab_size + 63) // 64) * 64
         self.wte = VocabParallelEmbedding(vocab_size, config.hidden_size)
         self.h = nn.ModuleList([
-            RefactDecoderLayer(config, cache_config, quant_config)
-            for _ in range(config.num_hidden_layers)
+            RefactDecoderLayer(
+                config,
+                prefix=f"{prefix}.h.{idx}",
+                cache_config=cache_config,
+                quant_config=quant_config,
+            ) for idx in range(config.num_hidden_layers)
         ])
 
     def forward(
